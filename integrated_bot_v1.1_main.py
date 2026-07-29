@@ -127,7 +127,7 @@ async def clear_chat_history_task(client: Client, chat_guid: str):
         state.status = BotStatus.IDLE; state.active_task = None
 
 # ==========================================
-# ۴. هسته استریم یکپارچه (Multipart Upload) 🌟
+# ۴. هسته استریم یکپارچه (Multipart Upload)
 # ==========================================
 class DynamicChunker:
     def __init__(self): self.buffer = bytearray()
@@ -175,7 +175,11 @@ async def _upload_multipart_chunk(session, auth, upload_url, file_id, total_part
                 res_json = await response.json()
                 
             if res_json.get("status") == "OK":
-                return res_json.get("data", {}).get("access_hash_rec", "") # روبیکا معمولا در پارت آخر این هش را میدهد
+                # 🌟 باگ‌فیکس حیاتی: مدیریت null بودن data در پارت‌های میانی روبیکا
+                data_block = res_json.get("data")
+                if data_block and isinstance(data_block, dict):
+                    return data_block.get("access_hash_rec", "")
+                return "" # در پارت‌های میانی رسید خالی برمی‌گردد که طبیعی است
             else: raise Exception(f"خطا: {res_json}")
         except asyncio.CancelledError: raise
         except Exception as e:
@@ -183,17 +187,14 @@ async def _upload_multipart_chunk(session, auth, upload_url, file_id, total_part
             else: raise Exception(f"تزریق پارت {part_index} شکست خورد: {e}")
 
 async def upload_entire_file_stream(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
-    # ۱. استخراج نام واقعی فایل از لینک
     parsed_url = urllib.parse.urlparse(file_url)
     file_name = os.path.basename(parsed_url.path)
     if not file_name or "." not in file_name: file_name = "stream_file.zip"
     mime = file_name.split(".")[-1]
 
-    # ۲. حجم ثابت و ایمن ۱ مگابایتی برای پارت‌ها
     CHUNK_SIZE = 1024 * 1024 
     total_parts = math.ceil(total_size_bytes / CHUNK_SIZE) if total_size_bytes else 1
 
-    # ۳. ثبت نام کل فایل در سرور روبیکا قبل از شروع آپلود
     res = await client.request_send_file(file_name, total_size_bytes, mime)
     file_id = getattr(res, 'id', getattr(res, 'file_id', res.get('id') if isinstance(res, dict) else None))
     upload_url = getattr(res, 'upload_url', res.get('upload_url') if isinstance(res, dict) else None)
@@ -207,7 +208,6 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     total_mb = total_size_bytes / (1024 * 1024) if total_size_bytes else 0
     final_access_hash = ""
     
-    # متغیرهای کنترل آپدیت داشبورد (برای جلوگیری از لیمیت شدن ویرایش پیام)
     last_update_time = time.time()
     last_percent = -1
 
@@ -216,7 +216,6 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
         for data_to_upload in chunker.extract_ready_chunks(CHUNK_SIZE):
             start_time = time.time()
             try:
-                # تزریق خاموش پارت به سرور
                 rec_hash = await _upload_multipart_chunk(shared_session, client.auth, upload_url, file_id, total_parts, part_index, data_to_upload, access_hash_send)
                 if rec_hash: final_access_hash = rec_hash
                 
@@ -224,7 +223,6 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
                 speed_bps = len(data_to_upload) / (time.time() - start_time)
                 percent = min(100, int((uploaded_bytes / total_size_bytes) * 100)) if total_size_bytes else 0
                 
-                # 🌟 مکانیزم ضد اسپمِ داشبورد: فقط هر ۴ ثانیه یک بار پیام را آپدیت کن
                 now = time.time()
                 if now - last_update_time > 4.0 and percent > last_percent:
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
@@ -242,7 +240,6 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
 
     await progress_callback("✅ تزریق پارت‌ها به پایان رسید. در حال ساخت فایل نهایی...")
     
-    # ۴. ارسال نهایی فایل به صورت یکپارچه در گروه
     await client.send_message(
         target_guid, 
         text=f"✅ دانلود مستقیم از سرور ابری انجام شد.\n📂 نام: {file_name}",
@@ -260,7 +257,7 @@ async def background_upload_task(client: Client, shared_session: aiohttp.ClientS
             if progress_msg_id: asyncio.create_task(_safe_update_ui(client, TARGET_CHAT_GUID, progress_msg_id, text))
             
         await upload_entire_file_stream(client, shared_session, target_url, TARGET_CHAT_GUID, total_size_bytes, update_dashboard)
-        if progress_msg_id: await client.delete_messages(TARGET_CHAT_GUID, [str(progress_msg_id)]) # حذف داشبورد پس از اتمام
+        if progress_msg_id: await client.delete_messages(TARGET_CHAT_GUID, [str(progress_msg_id)]) 
     except asyncio.CancelledError:
         if progress_msg_id: await _safe_update_ui(client, TARGET_CHAT_GUID, progress_msg_id, "🛑 **عملیات توسط کاربر لغو شد.**")
     except Exception as e:
