@@ -54,7 +54,7 @@ state = AppState(status=BotStatus.IDLE, pending_url=None, pending_size_bytes=0, 
 message_queue = asyncio.Queue()
 
 # ==========================================
-# ۲. سرور فِیک برای عبور از Health Check (Thread کاملاً مجزا) 🌟
+# ۲. سرور فِیک برای عبور از Health Check (Thread کاملاً مجزا)
 # ==========================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -62,23 +62,21 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(b"Bot is Alive!")
-    # این تابع را می‌بندیم تا لاگ‌های آروان‌کلود کنسول ما را شلوغ نکند
     def log_message(self, format, *args):
         pass 
 
 def start_health_server():
     try:
         server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
-        print("🌐 [سیستم] قلب تپنده (Health Check) در یک Thread کاملاً مجزا روی پورت 8080 روشن شد.")
+        print("🌐 [سیستم] قلب تپنده در Thread مجزا روی پورت 8080 روشن شد.")
         server.serve_forever()
     except Exception as e:
-        print(f"❌ خطای سرور سلامت: {e}")
+        pass
 
-# روشن کردن سرور سلامت در پس‌زمینه (استقلال کامل از روبیکا)
 threading.Thread(target=start_health_server, daemon=True).start()
 
 # ==========================================
-# ۳. ابزارهای شبکه و روبیکا
+# ۳. ابزارهای شبکه و روبیکا (باگ‌فیکس شده)
 # ==========================================
 async def get_remote_file_size(url: str, session: aiohttp.ClientSession) -> int:
     try:
@@ -92,6 +90,8 @@ def extract_message_id(msg_res) -> int:
     if isinstance(msg_res, dict): return int(msg_res.get("data", {}).get("message_update", {}).get("message_id") or msg_res.get("data", {}).get("message", {}).get("message_id") or 0)
     msg_update = getattr(msg_res, 'message_update', None)
     if msg_update: return int(getattr(msg_update, 'message_id', 0) or 0)
+    msg_data = getattr(msg_res, 'message', None)
+    if msg_data: return int(getattr(msg_data, 'message_id', 0) or 0)
     return 0
 
 async def _safe_update_ui(client: Client, chat_guid: str, msg_id: int, text: str):
@@ -109,7 +109,11 @@ async def clear_chat_history_task(client: Client, chat_guid: str):
             messages = res.get("data", {}).get("messages", []) if isinstance(res, dict) else getattr(res, 'messages', [])
             if not messages: break 
             
-            msg_ids = [str(getattr(msg, "message_id", msg.get("message_id"))) for msg in messages if getattr(msg, "message_id", msg.get("message_id"))]
+            msg_ids = []
+            for msg in messages:
+                mid = msg.get("message_id") if isinstance(msg, dict) else getattr(msg, "message_id", None)
+                if mid: msg_ids.append(str(mid))
+                
             if not msg_ids: break
             await client.delete_messages(chat_guid, msg_ids)
             deleted_count += len(msg_ids)
@@ -225,13 +229,19 @@ async def message_fetcher(client: Client):
             if not messages: current_sleep = min(MAX_SLEEP, current_sleep * 1.5); continue
             has_new = False
             for msg in reversed(messages):
-                msg_id = int(getattr(msg, "message_id", msg.get("message_id", 0)))
+                # باگ‌فیکس: جلوگیری از اجرای تابع روی ساختارهای اشتباه 
+                msg_id = int(msg.get("message_id", 0) if isinstance(msg, dict) else getattr(msg, "message_id", 0))
+                
                 if msg_id > state.last_processed_id:
                     has_new = True; state.last_processed_id = msg_id
-                    text = getattr(msg, "text", msg.get("text", ""))
+                    
+                    # باگ‌فیکس اصلی: ارزیابی شرطی متغیرها
+                    text = msg.get("text", "") if isinstance(msg, dict) else getattr(msg, "text", "")
+                    
                     if text: await message_queue.put({"id": msg_id, "text": str(text).strip()})
             current_sleep = MIN_SLEEP if has_new else min(MAX_SLEEP, current_sleep * 1.5)
-        except Exception: current_sleep = MAX_SLEEP 
+        except Exception: 
+            current_sleep = MAX_SLEEP 
 
 async def command_processor(client: Client, shared_session: aiohttp.ClientSession):
     while True:
@@ -278,7 +288,6 @@ async def main():
         init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 سیستمِ یکپارچه ابری آماده دریافت فرامین است...")
         state.last_processed_id = extract_message_id(init_msg)
         
-        # حذف سرور سلامت از اینجا تا روبیکا با سرعت ۱۰۰٪ کار کند!
         await asyncio.gather(
             asyncio.create_task(message_fetcher(client)), 
             asyncio.create_task(command_processor(client, shared_session))
