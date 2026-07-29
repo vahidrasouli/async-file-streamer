@@ -144,7 +144,6 @@ async def stream_generator(file_url, shared_session, chunk_size=64*1024):
         resp.raise_for_status()
         async for chunk in resp.content.iter_chunked(chunk_size): yield chunk 
 
-# 🌟 تغییر ۱: افزایش تعداد تلاش مجدد به ۵ بار برای مقابله با Connection Reset
 async def upload_memory_part(client, session, target_guid, part_data: bytes, part_name: str, max_retries=5):
     size, mime = len(part_data), part_name.split(".")[-1]
     res = await client.request_send_file(part_name, size, mime)
@@ -157,13 +156,11 @@ async def upload_memory_part(client, session, target_guid, part_data: bytes, par
 
     for attempt in range(max_retries):
         try:
-            # 🌟 تغییر ۲: افزایش زمان تایم‌اوت به ۱۲۰ ثانیه برای پارت‌های بزرگ
             async with session.post(
                 url=upload_url, headers={"auth": client.auth, "file-id": str(file_id), "total-part": "1", "part-number": "1", "chunk-size": str(size), "access-hash-send": str(access_hash_send)},
                 data=part_data, timeout=aiohttp.ClientTimeout(total=120)
             ) as response:
                 
-                # 🌟 تغییر ۳: بررسی وضعیت HTTP قبل از تبدیل به JSON (جلوگیری از باگ 413 HTML)
                 if response.status != 200:
                     error_text = await response.text()
                     raise Exception(f"HTTP {response.status}: {error_text[:50]}")
@@ -178,13 +175,15 @@ async def upload_memory_part(client, session, target_guid, part_data: bytes, par
         except asyncio.CancelledError: raise
         except Exception as e:
             if attempt < max_retries - 1: 
-                await asyncio.sleep(2 ** attempt) # مکث نمایی برای وصل شدن مجدد به شبکه
+                await asyncio.sleep(2 ** attempt) 
             else: raise Exception(f"آپلود شکست خورد: {e}")
 
 async def dynamic_memory_streaming(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
-    # 🌟 تغییر ۴: سقف حجم هر پارت به ۸ مگابایت محدود شد تا به لیمیت سرور روبیکا (413) نخوریم
-    MIN_SIZE, MAX_SIZE, TARGET_UPLOAD_TIME = 1024 * 1024, 8 * 1024 * 1024, 4.0            
-    current_target_size = 2 * 1024 * 1024   
+    # 🌟 سقف حجم هر پارت روی ۱.۵ مگابایت قفل شد تا از ارور 413 جلوگیری شود
+    MIN_SIZE = 512 * 1024                # 512 KB
+    MAX_SIZE = int(1.5 * 1024 * 1024)    # 1.5 MB (حجم استاندارد روبیکا)
+    TARGET_UPLOAD_TIME = 2.0            
+    current_target_size = 1024 * 1024    # استارت با 1 MB
     chunker, part_index, uploaded_bytes = DynamicChunker(), 1, 0
     total_mb = total_size_bytes / (1024 * 1024) if total_size_bytes else 0
     
