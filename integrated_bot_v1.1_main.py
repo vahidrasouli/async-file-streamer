@@ -37,6 +37,7 @@ else:
 # ۱. تنظیمات و متغیرهای ایزوله ربات
 # ==========================================
 AUTH_PREFIX = "#dl_"
+MAX_ALLOWED_SIZE = 1950 * 1024 * 1024 # 🌟 سقف مجاز: 1.95 گیگابایت
 
 class BotStatus(Enum):
     IDLE = "idle"
@@ -127,7 +128,7 @@ async def clear_chat_history_task(client: Client, chat_guid: str):
         state.status = BotStatus.IDLE; state.active_task = None
 
 # ==========================================
-# ۴. هسته استریم یکپارچه (Multipart Upload)
+# ۴. هسته استریم یکپارچه (Multipart Upload - TURBO 🚀)
 # ==========================================
 class DynamicChunker:
     def __init__(self): self.buffer = bytearray()
@@ -175,11 +176,10 @@ async def _upload_multipart_chunk(session, auth, upload_url, file_id, total_part
                 res_json = await response.json()
                 
             if res_json.get("status") == "OK":
-                # 🌟 باگ‌فیکس حیاتی: مدیریت null بودن data در پارت‌های میانی روبیکا
                 data_block = res_json.get("data")
                 if data_block and isinstance(data_block, dict):
                     return data_block.get("access_hash_rec", "")
-                return "" # در پارت‌های میانی رسید خالی برمی‌گردد که طبیعی است
+                return ""
             else: raise Exception(f"خطا: {res_json}")
         except asyncio.CancelledError: raise
         except Exception as e:
@@ -192,10 +192,20 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     if not file_name or "." not in file_name: file_name = "stream_file.zip"
     mime = file_name.split(".")[-1]
 
-    CHUNK_SIZE = 1024 * 1024 
+    # حجم ۱.۵ مگابایتی برای پارت‌ها جهت بهینه‌سازی
+    CHUNK_SIZE = int(1.5 * 1024 * 1024) 
     total_parts = math.ceil(total_size_bytes / CHUNK_SIZE) if total_size_bytes else 1
 
-    res = await client.request_send_file(file_name, total_size_bytes, mime)
+    # 🌟 ثبت فایل در روبیکا با مکانیزم Retry
+    res = None
+    for attempt in range(3):
+        try:
+            res = await client.request_send_file(file_name, total_size_bytes, mime)
+            break
+        except Exception as e:
+            if attempt < 2: await asyncio.sleep(2)
+            else: raise Exception(f"خطا در ارتباط اولیه با روبیکا: {e}")
+
     file_id = getattr(res, 'id', getattr(res, 'file_id', res.get('id') if isinstance(res, dict) else None))
     upload_url = getattr(res, 'upload_url', res.get('upload_url') if isinstance(res, dict) else None)
     access_hash_send = getattr(res, 'access_hash_send', res.get('access_hash_send') if isinstance(res, dict) else None)
@@ -204,47 +214,78 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     if not upload_url: raise Exception("روبیکا لینک آپلود یکپارچه نداد.")
 
     chunker = DynamicChunker()
-    part_index, uploaded_bytes = 1, 0
+    part_index = 1
+    uploaded_bytes = 0
     total_mb = total_size_bytes / (1024 * 1024) if total_size_bytes else 0
     final_access_hash = ""
     
     last_update_time = time.time()
     last_percent = -1
+    
+    # 🌟 پیاده‌سازی آپلود موازی (Concurrency) برای سرعت توربو
+    tasks = []
+    start_time = time.time()
+
+    async def upload_task_wrapper(d, p_idx):
+        rec = await _upload_multipart_chunk(shared_session, client.auth, upload_url, file_id, total_parts, p_idx, d, access_hash_send)
+        return (p_idx, rec, len(d))
 
     async for incoming_chunk in stream_generator(file_url, shared_session):
         chunker.add_data(incoming_chunk)
         for data_to_upload in chunker.extract_ready_chunks(CHUNK_SIZE):
-            start_time = time.time()
-            try:
-                rec_hash = await _upload_multipart_chunk(shared_session, client.auth, upload_url, file_id, total_parts, part_index, data_to_upload, access_hash_send)
-                if rec_hash: final_access_hash = rec_hash
+            
+            # اضافه‌کردن تسک آپلود به صف موازی
+            task = asyncio.create_task(upload_task_wrapper(data_to_upload, part_index))
+            tasks.append(task)
+            part_index += 1
+            
+            # وقتی ۴ پارت در صف قرار گرفت، همه را همزمان شلیک کن! 🚀
+            if len(tasks) >= 4:
+                results = await asyncio.gather(*tasks)
+                for p_idx, rec_hash, length in results:
+                    if rec_hash: final_access_hash = rec_hash
+                    uploaded_bytes += length
+                tasks.clear()
                 
-                uploaded_bytes += len(data_to_upload)
-                speed_bps = len(data_to_upload) / (time.time() - start_time)
+                # بروزرسانی داشبورد
+                speed_bps = uploaded_bytes / (time.time() - start_time)
                 percent = min(100, int((uploaded_bytes / total_size_bytes) * 100)) if total_size_bytes else 0
-                
                 now = time.time()
                 if now - last_update_time > 4.0 and percent > last_percent:
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
-                    await progress_callback(f"🚀 **تزریق یکپارچه فایل**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت: {part_index} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB\n\n*(آپلود بصورت پس‌زمینه در حال انجام است...)*")
+                    await progress_callback(f"🚀 **تزریق موازی (حالت توربو)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
                     last_update_time, last_percent = now, percent
-                
-                part_index += 1
-            except asyncio.CancelledError: raise
-            except Exception as e: raise Exception(f"ارور در پارت {part_index}: {e}") 
                 
     remaining_data = chunker.extract_remaining()
     if remaining_data: 
-        rec_hash = await _upload_multipart_chunk(shared_session, client.auth, upload_url, file_id, total_parts, part_index, remaining_data, access_hash_send)
-        if rec_hash: final_access_hash = rec_hash
+        task = asyncio.create_task(upload_task_wrapper(remaining_data, part_index))
+        tasks.append(task)
 
-    await progress_callback("✅ تزریق پارت‌ها به پایان رسید. در حال ساخت فایل نهایی...")
+    # شلیک پارت‌های باقی‌مانده نهایی
+    if tasks:
+        results = await asyncio.gather(*tasks)
+        for p_idx, rec_hash, length in results:
+            if rec_hash: final_access_hash = rec_hash
+            uploaded_bytes += length
+        tasks.clear()
+
+    await progress_callback("✅ تزریق پارت‌ها پایان یافت. در حال همگام‌سازی نهایی سرور...")
     
-    await client.send_message(
-        target_guid, 
-        text=f"✅ دانلود مستقیم از سرور ابری انجام شد.\n📂 نام: {file_name}",
-        file_inline={"mime": mime, "size": total_size_bytes, "dc_id": str(dc_id), "file_id": str(file_id), "file_name": file_name, "access_hash_rec": final_access_hash, "type": "File"}
-    )
+    # 🌟 مقاومت در برابر ارور SERVER_ERROR روبیکا با تلاش مجدد (مناسب برای فایل‌های 1 گیگ به بالا)
+    for attempt in range(4):
+        try:
+            await client.send_message(
+                target_guid, 
+                text=f"✅ دانلود مستقیم از سرور ابری انجام شد.\n📂 نام: {file_name}",
+                file_inline={"mime": mime, "size": total_size_bytes, "dc_id": str(dc_id), "file_id": str(file_id), "file_name": file_name, "access_hash_rec": final_access_hash, "type": "File"}
+            )
+            break # اگر موفق شد حلقه رو بشکن
+        except Exception as e:
+            if attempt < 3:
+                await progress_callback(f"⚠️ سرور روبیکا در حال پردازش فایل است. تلاش مجدد ({attempt+1}/3)...")
+                await asyncio.sleep(5)
+            else:
+                raise Exception(f"خطا در ایجاد پیام نهایی: {e}")
 
 # ==========================================
 # ۵. مدیریت تسک‌های پس‌زمینه ربات
@@ -302,7 +343,12 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
                 await client.send_message(TARGET_CHAT_GUID, "🔄 آنالیز سرور مبدا...", reply_to_message_id=str(msg_id))
                 await asyncio.sleep(0.5)
                 size = await get_remote_file_size(url, shared_session)
-                if size == 0: await client.send_message(TARGET_CHAT_GUID, "❌ سرور حجم را برنگرداند.", reply_to_message_id=str(msg_id))
+                
+                # 🌟 بررسی هوشمندانه سایز فایل قبل از شروع عملیات
+                if size == 0: 
+                    await client.send_message(TARGET_CHAT_GUID, "❌ سرور مبدا حجم را برنگرداند.", reply_to_message_id=str(msg_id))
+                elif size > MAX_ALLOWED_SIZE:
+                    await client.send_message(TARGET_CHAT_GUID, f"❌ **رد درخواست:**\nحجم فایل شما ({(size/(1024*1024*1024)):.2f} GB) بیشتر از سقف مجاز سرورهای روبیکا (حدود ۲ گیگابایت) است.", reply_to_message_id=str(msg_id))
                 else:
                     state.status, state.pending_url, state.pending_size_bytes = BotStatus.WAITING, url, size
                     await client.send_message(TARGET_CHAT_GUID, f"📦 استریم یکپارچه:\n🔗 {url}\n⚖️ {(size/(1024*1024)):.2f} MB\nدستور؟ (تایید / لغو)", reply_to_message_id=str(msg_id))
@@ -327,9 +373,9 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
 # ۶. اجرای اصلی
 # ==========================================
 async def main():
-    connector = aiohttp.TCPConnector(limit=10)
+    connector = aiohttp.TCPConnector(limit=20)
     async with Client('time_sessions') as client, aiohttp.ClientSession(connector=connector) as shared_session:
-        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 سیستم آپلود یکپارچه ابری روشن شد...")
+        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 سیستم آپلود موازی (Turbo) روشن شد...")
         state.last_processed_id = extract_message_id(init_msg)
         
         await asyncio.gather(
