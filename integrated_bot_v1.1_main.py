@@ -139,10 +139,38 @@ class DynamicChunker:
         data, self.buffer = bytes(self.buffer), bytearray()
         return data
 
-async def stream_generator(file_url, shared_session, chunk_size=64*1024):
-    async with shared_session.get(file_url, timeout=aiohttp.ClientTimeout(total=0, sock_read=30)) as resp:
-        resp.raise_for_status()
-        async for chunk in resp.content.iter_chunked(chunk_size): yield chunk 
+# 🌟 تغییر حیاتی: قابلیت Resume برای سرور مبدا به استریم ژنراتور اضافه شد
+async def stream_generator(file_url, shared_session, chunk_size=64*1024, max_retries=10):
+    downloaded_bytes = 0
+    retries = 0
+    
+    while retries < max_retries:
+        headers = {}
+        if downloaded_bytes > 0:
+            headers["Range"] = f"bytes={downloaded_bytes}-"
+            
+        try:
+            timeout = aiohttp.ClientTimeout(total=0, sock_read=60)
+            async with shared_session.get(file_url, headers=headers, timeout=timeout) as resp:
+                resp.raise_for_status()
+                
+                # بررسی اینکه آیا سرور مبدا Resume را قبول کرده است یا خیر
+                if downloaded_bytes > 0 and resp.status != 206:
+                    raise Exception("سرور مبدا از قابلیت Resume پشتیبانی نمی‌کند.")
+                    
+                async for chunk in resp.content.iter_chunked(chunk_size):
+                    yield chunk
+                    downloaded_bytes += len(chunk)
+                    
+                return # استریم با موفقیت تمام شد
+                
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            retries += 1
+            if retries >= max_retries:
+                raise Exception(f"قطع ارتباط مداوم با سرور مبدا: {e}")
+            await asyncio.sleep(3) # مکث کوتاه قبل از تلاش مجدد برای اتصال به مبدا
 
 async def upload_memory_part(client, session, target_guid, part_data: bytes, part_name: str, max_retries=5):
     size, mime = len(part_data), part_name.split(".")[-1]
@@ -179,11 +207,10 @@ async def upload_memory_part(client, session, target_guid, part_data: bytes, par
             else: raise Exception(f"آپلود شکست خورد: {e}")
 
 async def dynamic_memory_streaming(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
-    # 🌟 سقف حجم هر پارت روی ۱.۵ مگابایت قفل شد تا از ارور 413 جلوگیری شود
-    MIN_SIZE = 512 * 1024                # 512 KB
-    MAX_SIZE = int(1.5 * 1024 * 1024)    # 1.5 MB (حجم استاندارد روبیکا)
+    MIN_SIZE = 512 * 1024                
+    MAX_SIZE = int(1.5 * 1024 * 1024)    
     TARGET_UPLOAD_TIME = 2.0            
-    current_target_size = 1024 * 1024    # استارت با 1 MB
+    current_target_size = 1024 * 1024    
     chunker, part_index, uploaded_bytes = DynamicChunker(), 1, 0
     total_mb = total_size_bytes / (1024 * 1024) if total_size_bytes else 0
     
