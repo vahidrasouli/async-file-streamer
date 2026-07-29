@@ -1,10 +1,11 @@
 import asyncio
 import aiohttp
-from aiohttp import web # 🌟 اضافه شدن ماژول وب برای دور زدن آروان‌کلود
 import time
 import os
 import base64
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dataclasses import dataclass
 from enum import Enum
 from rubpy import Client
@@ -17,18 +18,15 @@ if session_env:
     try:
         with open("time_sessions.rp", "wb") as f:
             f.write(base64.b64decode(session_env))
-        print("✅ [سیستم] فایل سشن با موفقیت استخراج شد.")
+        print("✅ [سیستم] فایل سشن استخراج شد.")
     except Exception as e:
-        print(f"❌ [سیستم] ارور در دیکد کردن سشن: {e}")
         sys.exit(1)
 
 target_guid_env = os.environ.get("TARGET_CHAT_GUID_BASE64")
 if target_guid_env:
     try:
         TARGET_CHAT_GUID = base64.b64decode(target_guid_env).decode("utf-8")
-        print("✅ [سیستم] آیدی چت هدف اعمال شد.")
     except Exception as e:
-        print(f"❌ [سیستم] ارور در دیکد کردن GUID: {e}")
         sys.exit(1)
 else:
     TARGET_CHAT_GUID = "u0JuWpO08150d3e4de8e3b77a5ef7488"
@@ -56,24 +54,28 @@ state = AppState(status=BotStatus.IDLE, pending_url=None, pending_size_bytes=0, 
 message_queue = asyncio.Queue()
 
 # ==========================================
-# ۲. سرور فِیک برای عبور از Health Check آروان‌کلود 🌟
+# ۲. سرور فِیک برای عبور از Health Check (Thread کاملاً مجزا) 🌟
 # ==========================================
-async def health_check_server():
-    async def handle(request):
-        return web.Response(text="Bot is Alive and Running!")
-    
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    # گوش دادن روی پورت 8080 برای پینگ‌های سرور ابری
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    print("🌐 [سیستم] سرورِ فِیک سلامت (Health Check) روی پورت 8080 روشن شد.")
-    
-    # زنده نگه داشتن سرور تا ابد
-    while True:
-        await asyncio.sleep(3600)
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is Alive!")
+    # این تابع را می‌بندیم تا لاگ‌های آروان‌کلود کنسول ما را شلوغ نکند
+    def log_message(self, format, *args):
+        pass 
+
+def start_health_server():
+    try:
+        server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
+        print("🌐 [سیستم] قلب تپنده (Health Check) در یک Thread کاملاً مجزا روی پورت 8080 روشن شد.")
+        server.serve_forever()
+    except Exception as e:
+        print(f"❌ خطای سرور سلامت: {e}")
+
+# روشن کردن سرور سلامت در پس‌زمینه (استقلال کامل از روبیکا)
+threading.Thread(target=start_health_server, daemon=True).start()
 
 # ==========================================
 # ۳. ابزارهای شبکه و روبیکا
@@ -87,8 +89,7 @@ async def get_remote_file_size(url: str, session: aiohttp.ClientSession) -> int:
     return 0
 
 def extract_message_id(msg_res) -> int:
-    if isinstance(msg_res, dict):
-        return int(msg_res.get("data", {}).get("message_update", {}).get("message_id") or msg_res.get("data", {}).get("message", {}).get("message_id") or 0)
+    if isinstance(msg_res, dict): return int(msg_res.get("data", {}).get("message_update", {}).get("message_id") or msg_res.get("data", {}).get("message", {}).get("message_id") or 0)
     msg_update = getattr(msg_res, 'message_update', None)
     if msg_update: return int(getattr(msg_update, 'message_id', 0) or 0)
     return 0
@@ -117,8 +118,7 @@ async def clear_chat_history_task(client: Client, chat_guid: str):
     except Exception as e:
         await client.send_message(chat_guid, f"❌ خطا در پاکسازی: {e}")
     finally:
-        state.status = BotStatus.IDLE
-        state.active_task = None
+        state.status = BotStatus.IDLE; state.active_task = None
 
 # ==========================================
 # ۴. هسته استریم و آپلود
@@ -132,19 +132,16 @@ class DynamicChunker:
             del self.buffer[:target_size]
             yield chunk
     def extract_remaining(self) -> bytes:
-        data = bytes(self.buffer)
-        self.buffer.clear()
+        data, self.buffer = bytes(self.buffer), bytearray()
         return data
 
 async def stream_generator(file_url, shared_session, chunk_size=64*1024):
     async with shared_session.get(file_url, timeout=aiohttp.ClientTimeout(total=0, sock_read=30)) as resp:
         resp.raise_for_status()
-        async for chunk in resp.content.iter_chunked(chunk_size):
-            yield chunk 
+        async for chunk in resp.content.iter_chunked(chunk_size): yield chunk 
 
 async def upload_memory_part(client, session, target_guid, part_data: bytes, part_name: str, max_retries=3):
-    size = len(part_data)
-    mime = part_name.split(".")[-1]
+    size, mime = len(part_data), part_name.split(".")[-1]
     res = await client.request_send_file(part_name, size, mime)
     file_id = getattr(res, 'id', getattr(res, 'file_id', res.get('id') if isinstance(res, dict) else None))
     upload_url = getattr(res, 'upload_url', res.get('upload_url') if isinstance(res, dict) else None)
@@ -173,8 +170,7 @@ async def upload_memory_part(client, session, target_guid, part_data: bytes, par
 async def dynamic_memory_streaming(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
     MIN_SIZE, MAX_SIZE, TARGET_UPLOAD_TIME = 256 * 1024, 25 * 1024 * 1024, 3.0            
     current_target_size = 1024 * 1024   
-    chunker = DynamicChunker()
-    part_index, uploaded_bytes = 1, 0
+    chunker, part_index, uploaded_bytes = DynamicChunker(), 1, 0
     total_mb = total_size_bytes / (1024 * 1024) if total_size_bytes else 0
     
     async for incoming_chunk in stream_generator(file_url, shared_session):
@@ -193,8 +189,7 @@ async def dynamic_memory_streaming(client, shared_session, file_url, target_guid
                 await progress_callback(f"🚀 **عملیات استریم فایل**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB\n⚡ سرعت لحظه‌ای: {(speed_bps/(1024*1024)):.2f} MB/s\n🧩 سایز پارت: {(len(data_to_upload)/(1024*1024)):.2f} MB")
                 part_index += 1
             except asyncio.CancelledError: raise
-            except Exception as e:
-                raise Exception(f"متاسفانه آپلود در پارت {part_index} متوقف شد: {e}") # عدم خراب کردن توالی بایت‌ها
+            except Exception as e: raise Exception(f"متوقف در پارت {part_index}: {e}") 
                 
     remaining_data = chunker.extract_remaining()
     if remaining_data: await upload_memory_part(client, shared_session, target_guid, remaining_data, f"part_{part_index}.mp4")
@@ -204,14 +199,14 @@ async def dynamic_memory_streaming(client, shared_session, file_url, target_guid
 # ==========================================
 async def background_upload_task(client: Client, shared_session: aiohttp.ClientSession, target_url: str, reply_to_id: int, total_size_bytes: int):
     try:
-        progress_msg = await client.send_message(TARGET_CHAT_GUID, "⏳ در حال اتصال به سرور مبدا...", reply_to_message_id=str(reply_to_id))
+        progress_msg = await client.send_message(TARGET_CHAT_GUID, "⏳ در حال اتصال...", reply_to_message_id=str(reply_to_id))
         progress_msg_id = extract_message_id(progress_msg)
         async def update_dashboard(text: str):
             if progress_msg_id: asyncio.create_task(_safe_update_ui(client, TARGET_CHAT_GUID, progress_msg_id, text))
         await dynamic_memory_streaming(client, shared_session, target_url, TARGET_CHAT_GUID, total_size_bytes, update_dashboard)
-        if progress_msg_id: await client.edit_message(TARGET_CHAT_GUID, str(progress_msg_id), f"✅ آپلود با موفقیت پایان یافت.\n🔗 {target_url}")
+        if progress_msg_id: await client.edit_message(TARGET_CHAT_GUID, str(progress_msg_id), f"✅ آپلود پایان یافت.\n🔗 {target_url}")
     except asyncio.CancelledError:
-        if progress_msg_id: await _safe_update_ui(client, TARGET_CHAT_GUID, progress_msg_id, "🛑 **عملیات استریم توسط کاربر متوقف (Kill) شد.**\nربات در حال بستن کانکشن‌ها...")
+        if progress_msg_id: await _safe_update_ui(client, TARGET_CHAT_GUID, progress_msg_id, "🛑 **عملیات لغو شد.**")
     except Exception as e:
         await client.send_message(TARGET_CHAT_GUID, f"❌ خطا: {e}", reply_to_message_id=str(reply_to_id))
     finally:
@@ -253,7 +248,7 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
                 await client.send_message(TARGET_CHAT_GUID, "🔄 آنالیز سرور مبدا...", reply_to_message_id=str(msg_id))
                 await asyncio.sleep(0.5)
                 size = await get_remote_file_size(url, shared_session)
-                if size == 0: await client.send_message(TARGET_CHAT_GUID, "❌ سرور مبدا حجم را برنگرداند.", reply_to_message_id=str(msg_id))
+                if size == 0: await client.send_message(TARGET_CHAT_GUID, "❌ سرور حجم را برنگرداند.", reply_to_message_id=str(msg_id))
                 else:
                     state.status, state.pending_url, state.pending_size_bytes = BotStatus.WAITING, url, size
                     await client.send_message(TARGET_CHAT_GUID, f"📦 استریم:\n🔗 {url}\n⚖️ {(size/(1024*1024)):.2f} MB\nدستور؟ (تایید / لغو)", reply_to_message_id=str(msg_id))
@@ -283,9 +278,8 @@ async def main():
         init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 سیستمِ یکپارچه ابری آماده دریافت فرامین است...")
         state.last_processed_id = extract_message_id(init_msg)
         
-        # اجرای همزمان سرور سلامت، رادار و پردازشگر
+        # حذف سرور سلامت از اینجا تا روبیکا با سرعت ۱۰۰٪ کار کند!
         await asyncio.gather(
-            asyncio.create_task(health_check_server()), 
             asyncio.create_task(message_fetcher(client)), 
             asyncio.create_task(command_processor(client, shared_session))
         )
