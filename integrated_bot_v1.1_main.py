@@ -76,7 +76,7 @@ def start_health_server():
 threading.Thread(target=start_health_server, daemon=True).start()
 
 # ==========================================
-# ۳. ابزارهای شبکه و روبیکا (باگ‌فیکس شده)
+# ۳. ابزارهای شبکه و روبیکا
 # ==========================================
 async def get_remote_file_size(url: str, session: aiohttp.ClientSession) -> int:
     try:
@@ -144,7 +144,8 @@ async def stream_generator(file_url, shared_session, chunk_size=64*1024):
         resp.raise_for_status()
         async for chunk in resp.content.iter_chunked(chunk_size): yield chunk 
 
-async def upload_memory_part(client, session, target_guid, part_data: bytes, part_name: str, max_retries=3):
+# 🌟 تغییر ۱: افزایش تعداد تلاش مجدد به ۵ بار برای مقابله با Connection Reset
+async def upload_memory_part(client, session, target_guid, part_data: bytes, part_name: str, max_retries=5):
     size, mime = len(part_data), part_name.split(".")[-1]
     res = await client.request_send_file(part_name, size, mime)
     file_id = getattr(res, 'id', getattr(res, 'file_id', res.get('id') if isinstance(res, dict) else None))
@@ -156,11 +157,19 @@ async def upload_memory_part(client, session, target_guid, part_data: bytes, par
 
     for attempt in range(max_retries):
         try:
+            # 🌟 تغییر ۲: افزایش زمان تایم‌اوت به ۱۲۰ ثانیه برای پارت‌های بزرگ
             async with session.post(
                 url=upload_url, headers={"auth": client.auth, "file-id": str(file_id), "total-part": "1", "part-number": "1", "chunk-size": str(size), "access-hash-send": str(access_hash_send)},
-                data=part_data, timeout=aiohttp.ClientTimeout(total=45)
+                data=part_data, timeout=aiohttp.ClientTimeout(total=120)
             ) as response:
+                
+                # 🌟 تغییر ۳: بررسی وضعیت HTTP قبل از تبدیل به JSON (جلوگیری از باگ 413 HTML)
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise Exception(f"HTTP {response.status}: {error_text[:50]}")
+                    
                 upload_result = await response.json()
+                
             if upload_result.get("status") == "OK":
                 access_hash_rec = upload_result.get("data", {}).get("access_hash_rec", "")
                 await client.send_message(target_guid, text=f"✅ {part_name} ارسال شد.", file_inline={"mime": mime, "size": size, "dc_id": str(dc_id), "file_id": str(file_id), "file_name": part_name, "access_hash_rec": access_hash_rec, "type": "File"})
@@ -168,12 +177,14 @@ async def upload_memory_part(client, session, target_guid, part_data: bytes, par
             else: raise Exception(f"روبیکا: {upload_result}")
         except asyncio.CancelledError: raise
         except Exception as e:
-            if attempt < max_retries - 1: await asyncio.sleep(2 ** attempt)
+            if attempt < max_retries - 1: 
+                await asyncio.sleep(2 ** attempt) # مکث نمایی برای وصل شدن مجدد به شبکه
             else: raise Exception(f"آپلود شکست خورد: {e}")
 
 async def dynamic_memory_streaming(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
-    MIN_SIZE, MAX_SIZE, TARGET_UPLOAD_TIME = 256 * 1024, 25 * 1024 * 1024, 3.0            
-    current_target_size = 1024 * 1024   
+    # 🌟 تغییر ۴: سقف حجم هر پارت به ۸ مگابایت محدود شد تا به لیمیت سرور روبیکا (413) نخوریم
+    MIN_SIZE, MAX_SIZE, TARGET_UPLOAD_TIME = 1024 * 1024, 8 * 1024 * 1024, 4.0            
+    current_target_size = 2 * 1024 * 1024   
     chunker, part_index, uploaded_bytes = DynamicChunker(), 1, 0
     total_mb = total_size_bytes / (1024 * 1024) if total_size_bytes else 0
     
@@ -229,15 +240,10 @@ async def message_fetcher(client: Client):
             if not messages: current_sleep = min(MAX_SLEEP, current_sleep * 1.5); continue
             has_new = False
             for msg in reversed(messages):
-                # باگ‌فیکس: جلوگیری از اجرای تابع روی ساختارهای اشتباه 
                 msg_id = int(msg.get("message_id", 0) if isinstance(msg, dict) else getattr(msg, "message_id", 0))
-                
                 if msg_id > state.last_processed_id:
                     has_new = True; state.last_processed_id = msg_id
-                    
-                    # باگ‌فیکس اصلی: ارزیابی شرطی متغیرها
                     text = msg.get("text", "") if isinstance(msg, dict) else getattr(msg, "text", "")
-                    
                     if text: await message_queue.put({"id": msg_id, "text": str(text).strip()})
             current_sleep = MIN_SLEEP if has_new else min(MAX_SLEEP, current_sleep * 1.5)
         except Exception: 
