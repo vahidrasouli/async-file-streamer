@@ -128,7 +128,7 @@ async def clear_chat_history_task(client: Client, chat_guid: str):
         state.status = BotStatus.IDLE; state.active_task = None
 
 # ==========================================
-# ۴. هسته استریم یکپارچه (Multipart Upload - TURBO 🚀)
+# ۴. هسته استریم یکپارچه (Multipart Upload - TURBO MAX 🚀🚀)
 # ==========================================
 class DynamicChunker:
     def __init__(self): self.buffer = bytearray()
@@ -192,20 +192,20 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     if not file_name or "." not in file_name: file_name = "stream_file.zip"
     mime = file_name.split(".")[-1]
 
-    # 🌟 ارتقاء سرعت: حجم پارت‌ها از ۱.۵ به ۳ مگابایت افزایش یافت!
-    CHUNK_SIZE = 3 * 1024 * 1024 
+    # 🌟 ارتقاء حجم پارت‌ها به ۴ مگابایت (زیر خط قرمز روبیکا)
+    CHUNK_SIZE = 4 * 1024 * 1024 
     total_parts = math.ceil(total_size_bytes / CHUNK_SIZE) if total_size_bytes else 1
 
-    # 🌟 مکانیزم هوشمند و سرسخت برای ارتباط اولیه (با گزارش به کاربر)
+    # 🌟 افزایش تعداد تلاش‌های اولیه به ۸ بار برای فایل‌های سنگین
     res = None
-    max_init_retries = 5
+    max_init_retries = 8
     for attempt in range(max_init_retries):
         try:
             res = await client.request_send_file(file_name, total_size_bytes, mime)
             break
         except Exception as e:
             if attempt < max_init_retries - 1:
-                wait_time = 5 * (attempt + 1) # ایجاد مکث تصاعدی: 5, 10, 15, 20 ثانیه
+                wait_time = 5 * (attempt + 1)
                 await progress_callback(f"⚠️ سرور روبیکا برای تخصیص فضا شلوغ است.\nتلاش مجدد ({attempt+1}/{max_init_retries}) در {wait_time} ثانیه دیگر...")
                 await asyncio.sleep(wait_time)
             else:
@@ -242,8 +242,8 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
             tasks.append(task)
             part_index += 1
             
-            # ارسال همزمان ۳ پارت (۹ مگابایت در هر شلیک موازی)
-            if len(tasks) >= 3:
+            # 🌟 ارتقاء موازی‌سازی: ارسال ۵ پارت به صورت همزمان (۲۰ مگابایت در هر شلیک)
+            if len(tasks) >= 5:
                 results = await asyncio.gather(*tasks)
                 for p_idx, rec_hash, length in results:
                     if rec_hash: final_access_hash = rec_hash
@@ -255,7 +255,7 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
                 now = time.time()
                 if now - last_update_time > 4.0 and percent > last_percent:
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
-                    await progress_callback(f"🚀 **تزریق موازی (حالت توربو پلاس)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts} (حجم {CHUNK_SIZE/(1024*1024):.1f}MB)\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
+                    await progress_callback(f"🚀 **تزریق موازی (حالت توربو مکس)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts} (حجم {CHUNK_SIZE/(1024*1024):.1f}MB)\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
                     last_update_time, last_percent = now, percent
                 
     remaining_data = chunker.extract_remaining()
@@ -272,8 +272,8 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
 
     await progress_callback("✅ تزریق پارت‌ها پایان یافت. در حال همگام‌سازی نهایی سرور...")
     
-    # 🌟 مقاومت در برابر ارور نهایی
-    for attempt in range(4):
+    # 🌟 افزایش تلاش‌های ثبت نهایی به ۶ بار
+    for attempt in range(6):
         try:
             await client.send_message(
                 target_guid, 
@@ -282,8 +282,8 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
             )
             break 
         except Exception as e:
-            if attempt < 3:
-                await progress_callback(f"⚠️ سرور روبیکا در حال پردازش نهایی است. تلاش مجدد ({attempt+1}/3)...")
+            if attempt < 5:
+                await progress_callback(f"⚠️ سرور روبیکا در حال پردازش نهایی است. تلاش مجدد ({attempt+1}/5)...")
                 await asyncio.sleep(5)
             else:
                 raise Exception(f"خطا در ایجاد پیام نهایی: {e}")
@@ -373,9 +373,9 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
 # ۶. اجرای اصلی
 # ==========================================
 async def main():
-    connector = aiohttp.TCPConnector(limit=20)
+    connector = aiohttp.TCPConnector(limit=30)
     async with Client('time_sessions') as client, aiohttp.ClientSession(connector=connector) as shared_session:
-        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 سیستم آپلود موازی (Turbo Plus) روشن شد...")
+        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 سیستم آپلود موازی (Turbo Max) روشن شد...")
         state.last_processed_id = extract_message_id(init_msg)
         
         await asyncio.gather(
