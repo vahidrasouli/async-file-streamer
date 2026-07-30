@@ -1,13 +1,12 @@
 import asyncio
 import aiohttp
+from aiohttp import web
 import time
 import os
 import base64
 import sys
-import threading
 import math
 import urllib.parse
-from http.server import SimpleHTTPRequestHandler, HTTPServer
 from dataclasses import dataclass
 from enum import Enum
 from rubpy import Client
@@ -33,7 +32,7 @@ if target_guid_env:
 else:
     TARGET_CHAT_GUID = "u0JuWpO08150d3e4de8e3b77a5ef7488"
 
-# 🌟 دامنه رایگان آروان خود را اینجا بگذارید (بدون http)
+# 🌟 دامنه رایگان آروان
 ARVAN_DOMAIN = os.environ.get("ARVAN_DOMAIN", "your-app-name.ir-thr-at1.arvanapp.ir")
 
 # ==========================================
@@ -42,7 +41,7 @@ ARVAN_DOMAIN = os.environ.get("ARVAN_DOMAIN", "your-app-name.ir-thr-at1.arvanapp
 AUTH_PREFIX = "#dl_"
 MAX_ALLOWED_SIZE = 1950 * 1024 * 1024 
 DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True) # ساخت پوشه دانلود لوکال
+os.makedirs(DOWNLOAD_DIR, exist_ok=True) 
 
 class BotStatus(Enum):
     IDLE = "idle"
@@ -62,30 +61,31 @@ state = AppState(status=BotStatus.IDLE, pending_url=None, pending_size_bytes=0, 
 message_queue = asyncio.Queue()
 
 # ==========================================
-# ۲. مینی وب‌سرور ابری (اختصاصی آروان) 🌟
+# ۲. وب‌سرور فوق‌سریع ابری (بر پایه aiohttp.web) 🚀
 # ==========================================
-class HybridFileServerHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=DOWNLOAD_DIR, **kwargs)
+async def health_handler(request):
+    return web.Response(text="Cloud Download Server is Active!")
 
-    def do_GET(self):
-        if self.path == '/' or self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b"Cloud Download Server is Active!")
-        else:
-            super().do_GET() # استریم فایل به مرورگر کلاینت
+async def file_handler(request):
+    file_name = request.match_info.get('file_name', '')
+    file_path = os.path.join(DOWNLOAD_DIR, file_name)
+    
+    # 🌟 استفاده از FileResponse که نیتیو از Range و Resume پشتیبانی می‌کند
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        return web.FileResponse(file_path)
+    return web.Response(status=404, text="404: File Not Found on Cloud Disk")
 
-def start_health_and_file_server():
-    try:
-        server = HTTPServer(('0.0.0.0', 8080), HybridFileServerHandler)
-        print("🌐 [سیستم] مینی وب‌سرور روی پورت 8080 روشن شد.")
-        server.serve_forever()
-    except Exception:
-        pass
-
-threading.Thread(target=start_health_and_file_server, daemon=True).start()
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_handler)
+    app.router.add_get('/health', health_handler)
+    app.router.add_get('/{file_name}', file_handler)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("🌐 [سیستم] وب‌سرور قدرتمند و ناهمگام (aiohttp) روی پورت 8080 استارت شد.")
 
 # ==========================================
 # ۳. ابزارهای شبکه و روبیکا
@@ -111,7 +111,7 @@ async def _safe_update_ui(client: Client, chat_guid: str, msg_id: int, text: str
     except Exception: pass 
 
 # ==========================================
-# ۴. هسته دانلود مستقیم روی هارد آروان 🌟
+# ۴. هسته دانلود مستقیم روی هارد آروان
 # ==========================================
 async def download_to_arvan_disk(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
     parsed_url = urllib.parse.urlparse(file_url)
@@ -127,7 +127,6 @@ async def download_to_arvan_disk(client, shared_session, file_url, target_guid, 
 
     await progress_callback(f"🚀 شروع مکش فایل به هارد آروان‌کلود...\nدیسک لوکال: {file_path}")
 
-    # باز کردن بافرِ سنگینِ 2 مگابایتی برای مکش سریع
     async with shared_session.get(file_url, timeout=aiohttp.ClientTimeout(total=0)) as resp:
         resp.raise_for_status()
         with open(file_path, 'wb') as f:
@@ -144,14 +143,12 @@ async def download_to_arvan_disk(client, shared_session, file_url, target_guid, 
                     await progress_callback(f"⚡ **دانلود به سرور آروان**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 دریافت: {downloaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
                     last_update_time, last_percent = now, percent
 
-    # ساخت لینک دانلود مستقیم از سرور آروان
     direct_link = f"http://{ARVAN_DOMAIN}/{urllib.parse.quote(file_name)}"
-    await progress_callback(f"✅ **عملیات موفق!**\nفایل روی هارد سرور قرار گرفت.\n\n🔗 **لینک دانلود مستقیم شما:**\n{direct_link}\n\n*(توجه: با ری‌استارت شدن کانتینر، فایل پاک خواهد شد)*")
+    await progress_callback(f"✅ **عملیات موفق!**\nفایل روی هارد سرور قرار گرفت.\n\n🔗 **لینک دانلود مستقیم شما:**\n{direct_link}\n\n*(توجه: این سرور قابلیت Resume و دانلود منیجر را به صورت کامل پشتیبانی می‌کند)*")
 
 # ==========================================
-# (کدهای آپلود روبیکا - مخفی شده برای جلوگیری از شلوغی متن، همان کدهای پایپ‌لاین قبلی هستند)
+# ۵. سیستم پایپ‌لاین روبیکا (مخفی شده با ماسک Dat)
 # ==========================================
-# من توابع DynamicChunker، stream_generator و upload_entire_file_stream رو دقیقاً همون نسخه Ultimate قبلی حفظ کردم تا اگر گفتی روبیکا، به مشکل نخوره.
 class DynamicChunker:
     def __init__(self): self.buffer = bytearray()
     def add_data(self, data: bytes): self.buffer.extend(data)
@@ -204,9 +201,12 @@ async def _upload_multipart_chunk(session, auth, upload_url, file_id, total_part
 
 async def upload_entire_file_stream(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
     parsed_url = urllib.parse.urlparse(file_url)
-    file_name = os.path.basename(parsed_url.path)
-    if not file_name or "." not in file_name: file_name = "stream_file.zip"
-    mime = file_name.split(".")[-1]
+    real_file_name = os.path.basename(parsed_url.path)
+    if not real_file_name or "." not in real_file_name: real_file_name = "stream_file.zip"
+    real_mime = real_file_name.split(".")[-1]
+
+    fake_file_name = f"data_block_{int(time.time())}.dat"
+    fake_mime = "dat"
 
     CHUNK_SIZE = 4 * 1024 * 1024 
     total_parts = math.ceil(total_size_bytes / CHUNK_SIZE) if total_size_bytes else 1
@@ -215,7 +215,7 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     res = None
     for attempt in range(8):
         try:
-            res = await client.request_send_file(file_name, total_size_bytes, mime)
+            res = await client.request_send_file(fake_file_name, total_size_bytes, fake_mime)
             break
         except Exception as e:
             if attempt < 7:
@@ -264,7 +264,7 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
                 now = time.time()
                 if now - last_update_time > 4.0 and percent > last_percent:
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
-                    await progress_callback(f"🚀 **پایپ‌لاین روبیکا**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
+                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته (Anti-Ban)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
                     last_update_time, last_percent = now, percent
                 
     remaining_data = chunker.extract_remaining()
@@ -284,8 +284,8 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
         try:
             await client.send_message(
                 target_guid, 
-                text=f"✅ دانلود مستقیم انجام شد.\n📂 نام: {file_name}",
-                file_inline={"mime": mime, "size": total_size_bytes, "dc_id": str(dc_id), "file_id": str(file_id), "file_name": file_name, "access_hash_rec": final_access_hash, "type": "File"}
+                text=f"✅ دانلود مستقیم انجام شد.\n📂 نام: {real_file_name}",
+                file_inline={"mime": real_mime, "size": total_size_bytes, "dc_id": str(dc_id), "file_id": str(file_id), "file_name": real_file_name, "access_hash_rec": final_access_hash, "type": "File"}
             )
             break 
         except Exception as e:
@@ -295,7 +295,7 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
             else: raise Exception(f"خطا در ایجاد پیام نهایی: {e}")
 
 # ==========================================
-# ۵. مدیریت تسک‌های پس‌زمینه ربات
+# ۶. مدیریت تسک‌های پس‌زمینه و روتر اصلی
 # ==========================================
 async def background_task_router(client: Client, shared_session: aiohttp.ClientSession, target_url: str, reply_to_id: int, total_size_bytes: int, mode: str):
     try:
@@ -385,12 +385,16 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
         finally: message_queue.task_done()
 
 # ==========================================
-# ۶. اجرای اصلی
+# ۷. اجرای اصلی و روتینگ Asynchronous
 # ==========================================
 async def main():
     connector = aiohttp.TCPConnector(limit=30)
+    
+    # 🌟 استارت وب‌سرور نیتیو aiohttp در پس‌زمینه بدون بلاک کردن ربات
+    asyncio.create_task(start_web_server())
+    
     async with Client('time_sessions') as client, aiohttp.ClientSession(connector=connector) as shared_session:
-        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 سیستم هیبریدی (آروان/روبیکا) راه‌اندازی شد...")
+        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 موتور وب‌سرور ناهمگام (Async) با موفقیت روی هسته سوار شد...")
         state.last_processed_id = extract_message_id(init_msg)
         
         await asyncio.gather(
