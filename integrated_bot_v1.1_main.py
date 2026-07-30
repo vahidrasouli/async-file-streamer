@@ -57,7 +57,7 @@ state = AppState(status=BotStatus.IDLE, pending_url=None, pending_size_bytes=0, 
 message_queue = asyncio.Queue()
 
 # ==========================================
-# ۲. سرور فِیک برای عبور از Health Check
+# ۲. سرور سلامت برای آروان‌کلود
 # ==========================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -124,7 +124,7 @@ async def clear_chat_history_task(client: Client, chat_guid: str):
         state.status = BotStatus.IDLE; state.active_task = None
 
 # ==========================================
-# ۴. هسته استریم یکپارچه (Pipeline پیوسته 🚀)
+# ۴. هسته استریم یکپارچه (Pipeline پیوسته + تیونینگ شبکه)
 # ==========================================
 class DynamicChunker:
     def __init__(self): self.buffer = bytearray()
@@ -138,7 +138,8 @@ class DynamicChunker:
         data, self.buffer = bytes(self.buffer), bytearray()
         return data
 
-async def stream_generator(file_url, shared_session, chunk_size=64*1024, max_retries=10):
+# 🌟 تیونینگ ۱: بزرگ کردن دریچه مکش مبدا به ۱ مگابایت
+async def stream_generator(file_url, shared_session, chunk_size=1024*1024, max_retries=10):
     downloaded_bytes, retries = 0, 0
     while retries < max_retries:
         headers = {"Range": f"bytes={downloaded_bytes}-"} if downloaded_bytes > 0 else {}
@@ -212,7 +213,6 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     last_update_time, last_percent = time.time(), -1
     start_time = time.time()
     
-    # 🌟 سیستم جریان پیوسته (جایگزین سیستم بسته‌ایِ قبلی)
     active_tasks = set()
 
     async def upload_task_wrapper(d, p_idx):
@@ -227,7 +227,6 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
             active_tasks.add(task)
             part_index += 1
             
-            # اگر ۵ تا تسک پر شد، فقط منتظر بمان تا «اولین» تسک تمام شود، سپس بلافاصله بعدی را بفرست!
             if len(active_tasks) >= MAX_CONCURRENT_UPLOADS:
                 done, active_tasks = await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
                 for t in done:
@@ -235,20 +234,18 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
                     if rec_hash: final_access_hash = rec_hash
                     uploaded_bytes += length
                 
-                # آپدیت UI فقط هر 4 ثانیه
                 speed_bps = uploaded_bytes / (time.time() - start_time)
                 percent = min(100, int((uploaded_bytes / total_size_bytes) * 100)) if total_size_bytes else 0
                 now = time.time()
                 if now - last_update_time > 4.0 and percent > last_percent:
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
-                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته (Continuous Flow)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
+                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته (Ultimate)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
                     last_update_time, last_percent = now, percent
                 
     remaining_data = chunker.extract_remaining()
     if remaining_data: 
         active_tasks.add(asyncio.create_task(upload_task_wrapper(remaining_data, part_index)))
 
-    # صبر برای پایان یافتن تمام پارت‌های باقی‌مانده در صف
     if active_tasks:
         done, _ = await asyncio.wait(active_tasks, return_when=asyncio.ALL_COMPLETED)
         for t in done:
@@ -332,7 +329,7 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
                 if size == 0: 
                     await client.send_message(TARGET_CHAT_GUID, "❌ سرور مبدا حجم را برنگرداند.", reply_to_message_id=str(msg_id))
                 elif size > MAX_ALLOWED_SIZE:
-                    await client.send_message(TARGET_CHAT_GUID, f"❌ **رد درخواست:**\nحجم فایل شما ({(size/(1024*1024*1024)):.2f} GB) بیشتر از سقف مجاز سرورهای روبیکا (حدود ۲ گیگابایت) است.", reply_to_message_id=str(msg_id))
+                    await client.send_message(TARGET_CHAT_GUID, f"❌ **رد درخواست:**\nحجم فایل شما ({(size/(1024*1024*1024)):.2f} GB) بیشتر از سقف مجاز سرورهای روبیکا است.", reply_to_message_id=str(msg_id))
                 else:
                     state.status, state.pending_url, state.pending_size_bytes = BotStatus.WAITING, url, size
                     await client.send_message(TARGET_CHAT_GUID, f"📦 استریم پیوسته:\n🔗 {url}\n⚖️ {(size/(1024*1024)):.2f} MB\nدستور؟ (تایید / لغو)", reply_to_message_id=str(msg_id))
@@ -357,9 +354,16 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
 # ۶. اجرای اصلی
 # ==========================================
 async def main():
-    connector = aiohttp.TCPConnector(limit=30)
+    # 🌟 تیونینگ ۲ و ۳: مدیریت سوکت‌ها، کش DNS و محدودیت کانکشن‌ها
+    connector = aiohttp.TCPConnector(
+        limit=50,                  # سقف کل کانکشن‌ها
+        limit_per_host=10,         # سقف کانکشن به یک سرور خاص (روبیکا) برای جلوگیری از ترافیک داخلی
+        use_dns_cache=True,        # ذخیره آی‌پی در رم
+        keepalive_timeout=120,     # باز نگه داشتن لوله‌های ارتباطی TCP
+        enable_cleanup_closed=True
+    )
     async with Client('time_sessions') as client, aiohttp.ClientSession(connector=connector) as shared_session:
-        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 پایپ‌لاینِ پیوسته و هوشمند راه‌اندازی شد...")
+        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 موتور تیونینگ شده (Ultimate) آماده به کار است...")
         state.last_processed_id = extract_message_id(init_msg)
         
         await asyncio.gather(
