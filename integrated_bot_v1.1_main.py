@@ -124,7 +124,7 @@ async def clear_chat_history_task(client: Client, chat_guid: str):
         state.status = BotStatus.IDLE; state.active_task = None
 
 # ==========================================
-# ۴. هسته استریم یکپارچه (Pipeline پیوسته + تیونینگ شبکه)
+# ۴. هسته استریم یکپارچه (Pipeline پیوسته + تنظیمات اصیل)
 # ==========================================
 class DynamicChunker:
     def __init__(self): self.buffer = bytearray()
@@ -138,8 +138,8 @@ class DynamicChunker:
         data, self.buffer = bytes(self.buffer), bytearray()
         return data
 
-# 🌟 تیونینگ ۱: بزرگ کردن دریچه مکش مبدا به ۱ مگابایت
-async def stream_generator(file_url, shared_session, chunk_size=1024*1024, max_retries=10):
+# 🌟 برگشت به بافر ۶۴ کیلوبایتی برای استریمِ روان مثل رودخانه
+async def stream_generator(file_url, shared_session, chunk_size=64*1024, max_retries=10):
     downloaded_bytes, retries = 0, 0
     while retries < max_retries:
         headers = {"Range": f"bytes={downloaded_bytes}-"} if downloaded_bytes > 0 else {}
@@ -239,7 +239,7 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
                 now = time.time()
                 if now - last_update_time > 4.0 and percent > last_percent:
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
-                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته (Ultimate)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
+                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
                     last_update_time, last_percent = now, percent
                 
     remaining_data = chunker.extract_remaining()
@@ -354,16 +354,10 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
 # ۶. اجرای اصلی
 # ==========================================
 async def main():
-    # 🌟 تیونینگ ۲ و ۳: مدیریت سوکت‌ها، کش DNS و محدودیت کانکشن‌ها
-    connector = aiohttp.TCPConnector(
-        limit=50,                  # سقف کل کانکشن‌ها
-        limit_per_host=10,         # سقف کانکشن به یک سرور خاص (روبیکا) برای جلوگیری از ترافیک داخلی
-        use_dns_cache=True,        # ذخیره آی‌پی در رم
-        keepalive_timeout=120,     # باز نگه داشتن لوله‌های ارتباطی TCP
-        enable_cleanup_closed=True
-    )
+    # 🌟 حذفِ محدودیت‌های TCP و برگشت به کانفیگِ طلایی و پایدار
+    connector = aiohttp.TCPConnector(limit=30)
     async with Client('time_sessions') as client, aiohttp.ClientSession(connector=connector) as shared_session:
-        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 موتور تیونینگ شده (Ultimate) آماده به کار است...")
+        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 موتور پایپ‌لاین (بدون محدودیت شبکه) آماده است...")
         state.last_processed_id = extract_message_id(init_msg)
         
         await asyncio.gather(
