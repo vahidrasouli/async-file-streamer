@@ -124,7 +124,7 @@ async def clear_chat_history_task(client: Client, chat_guid: str):
         state.status = BotStatus.IDLE; state.active_task = None
 
 # ==========================================
-# ۴. هسته استریم یکپارچه (Pipeline پیوسته + تنظیمات اصیل)
+# ۴. هسته استریم یکپارچه (عملیات تغییر هویت 🕵️‍♂️)
 # ==========================================
 class DynamicChunker:
     def __init__(self): self.buffer = bytearray()
@@ -138,7 +138,6 @@ class DynamicChunker:
         data, self.buffer = bytes(self.buffer), bytearray()
         return data
 
-# 🌟 برگشت به بافر ۶۴ کیلوبایتی برای استریمِ روان مثل رودخانه
 async def stream_generator(file_url, shared_session, chunk_size=64*1024, max_retries=10):
     downloaded_bytes, retries = 0, 0
     while retries < max_retries:
@@ -178,10 +177,14 @@ async def _upload_multipart_chunk(session, auth, upload_url, file_id, total_part
             else: raise Exception(f"شکست پارت {part_index}: {e}")
 
 async def upload_entire_file_stream(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
+    # 🌟 عملیات Spoofing: استخراج نام اصلی، اما ساخت یک هویت جعلی برای سرور
     parsed_url = urllib.parse.urlparse(file_url)
-    file_name = os.path.basename(parsed_url.path)
-    if not file_name or "." not in file_name: file_name = "stream_file.zip"
-    mime = file_name.split(".")[-1]
+    real_file_name = os.path.basename(parsed_url.path)
+    if not real_file_name or "." not in real_file_name: real_file_name = "stream_file.zip"
+    real_mime = real_file_name.split(".")[-1]
+
+    fake_file_name = f"data_block_{int(time.time())}.dat"
+    fake_mime = "dat"
 
     CHUNK_SIZE = 4 * 1024 * 1024 
     total_parts = math.ceil(total_size_bytes / CHUNK_SIZE) if total_size_bytes else 1
@@ -190,7 +193,8 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     res = None
     for attempt in range(8):
         try:
-            res = await client.request_send_file(file_name, total_size_bytes, mime)
+            # 🕵️‍♂️ ارسال هویت جعلی به روبیکا برای دور زدن محدودیت‌های مدیا
+            res = await client.request_send_file(fake_file_name, total_size_bytes, fake_mime)
             break
         except Exception as e:
             if attempt < 7:
@@ -239,7 +243,7 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
                 now = time.time()
                 if now - last_update_time > 4.0 and percent > last_percent:
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
-                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
+                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته (Anti-Ban)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
                     last_update_time, last_percent = now, percent
                 
     remaining_data = chunker.extract_remaining()
@@ -257,10 +261,11 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     
     for attempt in range(6):
         try:
+            # 🌟 نقاب برداشته می‌شود: ارسال فایل با نام و فرمت واقعی برای کاربر
             await client.send_message(
                 target_guid, 
-                text=f"✅ دانلود مستقیم انجام شد.\n📂 نام: {file_name}",
-                file_inline={"mime": mime, "size": total_size_bytes, "dc_id": str(dc_id), "file_id": str(file_id), "file_name": file_name, "access_hash_rec": final_access_hash, "type": "File"}
+                text=f"✅ دانلود مستقیم انجام شد.\n📂 نام: {real_file_name}",
+                file_inline={"mime": real_mime, "size": total_size_bytes, "dc_id": str(dc_id), "file_id": str(file_id), "file_name": real_file_name, "access_hash_rec": final_access_hash, "type": "File"}
             )
             break 
         except Exception as e:
@@ -354,10 +359,9 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
 # ۶. اجرای اصلی
 # ==========================================
 async def main():
-    # 🌟 حذفِ محدودیت‌های TCP و برگشت به کانفیگِ طلایی و پایدار
     connector = aiohttp.TCPConnector(limit=30)
     async with Client('time_sessions') as client, aiohttp.ClientSession(connector=connector) as shared_session:
-        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 موتور پایپ‌لاین (بدون محدودیت شبکه) آماده است...")
+        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 موتور پایپ‌لاین (با سیستم Anti-Ban) آماده است...")
         state.last_processed_id = extract_message_id(init_msg)
         
         await asyncio.gather(
