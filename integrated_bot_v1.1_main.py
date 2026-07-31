@@ -32,7 +32,6 @@ if target_guid_env:
 else:
     TARGET_CHAT_GUID = "u0JuWpO08150d3e4de8e3b77a5ef7488"
 
-# 🌟 دامنه رایگان آروان
 ARVAN_DOMAIN = os.environ.get("ARVAN_DOMAIN", "your-app-name.ir-thr-at1.arvanapp.ir")
 
 # ==========================================
@@ -61,35 +60,14 @@ state = AppState(status=BotStatus.IDLE, pending_url=None, pending_size_bytes=0, 
 message_queue = asyncio.Queue()
 
 # ==========================================
-# ۲. وب‌سرور فوق‌سریع ابری (بر پایه aiohttp.web) 🚀
+# ۲. ابزارهای کمکی و زمان‌سنج ⏱
 # ==========================================
-async def health_handler(request):
-    return web.Response(text="Cloud Download Server is Active!")
+def format_time(seconds):
+    mins, secs = divmod(int(seconds), 60)
+    hrs, mins = divmod(mins, 60)
+    if hrs > 0: return f"{hrs:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
 
-async def file_handler(request):
-    file_name = request.match_info.get('file_name', '')
-    file_path = os.path.join(DOWNLOAD_DIR, file_name)
-    
-    # 🌟 استفاده از FileResponse که نیتیو از Range و Resume پشتیبانی می‌کند
-    if os.path.exists(file_path) and os.path.isfile(file_path):
-        return web.FileResponse(file_path)
-    return web.Response(status=404, text="404: File Not Found on Cloud Disk")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get('/', health_handler)
-    app.router.add_get('/health', health_handler)
-    app.router.add_get('/{file_name}', file_handler)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    print("🌐 [سیستم] وب‌سرور قدرتمند و ناهمگام (aiohttp) روی پورت 8080 استارت شد.")
-
-# ==========================================
-# ۳. ابزارهای شبکه و روبیکا
-# ==========================================
 async def get_remote_file_size(url: str, session: aiohttp.ClientSession) -> int:
     try:
         custom_timeout = aiohttp.ClientTimeout(total=5, connect=2)
@@ -111,6 +89,29 @@ async def _safe_update_ui(client: Client, chat_guid: str, msg_id: int, text: str
     except Exception: pass 
 
 # ==========================================
+# ۳. وب‌سرور ابری آروان
+# ==========================================
+async def health_handler(request):
+    return web.Response(text="Cloud Download Server is Active!")
+
+async def file_handler(request):
+    file_name = request.match_info.get('file_name', '')
+    file_path = os.path.join(DOWNLOAD_DIR, file_name)
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        return web.FileResponse(file_path)
+    return web.Response(status=404, text="404: File Not Found on Cloud Disk")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_handler)
+    app.router.add_get('/health', health_handler)
+    app.router.add_get('/{file_name}', file_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+
+# ==========================================
 # ۴. هسته دانلود مستقیم روی هارد آروان
 # ==========================================
 async def download_to_arvan_disk(client, shared_session, file_url, target_guid, total_size_bytes, progress_callback):
@@ -125,7 +126,7 @@ async def download_to_arvan_disk(client, shared_session, file_url, target_guid, 
     last_update_time = time.time()
     last_percent = -1
 
-    await progress_callback(f"🚀 شروع مکش فایل به هارد آروان‌کلود...\nدیسک لوکال: {file_path}")
+    await progress_callback(f"🚀 شروع مکش فایل به هارد آروان‌کلود...\nدیسک لوکال: `{file_path}`")
 
     async with shared_session.get(file_url, timeout=aiohttp.ClientTimeout(total=0)) as resp:
         resp.raise_for_status()
@@ -138,16 +139,28 @@ async def download_to_arvan_disk(client, shared_session, file_url, target_guid, 
                 now = time.time()
                 
                 if now - last_update_time > 2.0 and percent > last_percent:
+                    elapsed = format_time(now - start_time)
                     speed_bps = downloaded_bytes / (now - start_time)
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
-                    await progress_callback(f"⚡ **دانلود به سرور آروان**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 دریافت: {downloaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
+                    await progress_callback(f"⚡ **دانلود به سرور آروان**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 دریافت: {downloaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB\n⏱ سپری شده: {elapsed}")
                     last_update_time, last_percent = now, percent
 
+    # پایان دانلود و گزارش‌گیری
+    final_elapsed = format_time(time.time() - start_time)
+    actual_size = os.path.getsize(file_path)
     direct_link = f"http://{ARVAN_DOMAIN}/{urllib.parse.quote(file_name)}"
-    await progress_callback(f"✅ **عملیات موفق!**\nفایل روی هارد سرور قرار گرفت.\n\n🔗 **لینک دانلود مستقیم شما:**\n{direct_link}\n\n*(توجه: این سرور قابلیت Resume و دانلود منیجر را به صورت کامل پشتیبانی می‌کند)*")
+    
+    msg = f"✅ **عملیات با موفقیت به پایان رسید!**\n\n"
+    msg += f"📂 نام فایل: `{file_name}`\n"
+    msg += f"⏱ زمان کل فرآیند: **{final_elapsed}**\n"
+    msg += f"⚖️ حجم ذخیره شده روی دیسک: **{actual_size / (1024*1024):.2f} MB**\n\n"
+    msg += f"🔗 **لینک دانلود مستقیم:**\n{direct_link}\n\n"
+    msg += "💡 (راهنما: برای مدیریت این فایل دستور `#files` را ارسال کنید)"
+    
+    await progress_callback(msg)
 
 # ==========================================
-# ۵. سیستم پایپ‌لاین روبیکا (مخفی شده با ماسک Dat)
+# ۵. سیستم پایپ‌لاین روبیکا (Anti-Ban)
 # ==========================================
 class DynamicChunker:
     def __init__(self): self.buffer = bytearray()
@@ -204,7 +217,6 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     real_file_name = os.path.basename(parsed_url.path)
     if not real_file_name or "." not in real_file_name: real_file_name = "stream_file.zip"
     real_mime = real_file_name.split(".")[-1]
-
     fake_file_name = f"data_block_{int(time.time())}.dat"
     fake_mime = "dat"
 
@@ -247,7 +259,6 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
     async for incoming_chunk in stream_generator(file_url, shared_session):
         chunker.add_data(incoming_chunk)
         for data_to_upload in chunker.extract_ready_chunks(CHUNK_SIZE):
-            
             task = asyncio.create_task(upload_task_wrapper(data_to_upload, part_index))
             active_tasks.add(task)
             part_index += 1
@@ -259,12 +270,14 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
                     if rec_hash: final_access_hash = rec_hash
                     uploaded_bytes += length
                 
-                speed_bps = uploaded_bytes / (time.time() - start_time)
-                percent = min(100, int((uploaded_bytes / total_size_bytes) * 100)) if total_size_bytes else 0
                 now = time.time()
+                speed_bps = uploaded_bytes / (now - start_time)
+                percent = min(100, int((uploaded_bytes / total_size_bytes) * 100)) if total_size_bytes else 0
+                
                 if now - last_update_time > 4.0 and percent > last_percent:
+                    elapsed = format_time(now - start_time)
                     bar = '█' * int(15 * percent // 100) + '░' * (15 - int(15 * percent // 100))
-                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته (Anti-Ban)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB")
+                    await progress_callback(f"🚀 **پایپ‌لاین پیوسته (Anti-Ban)**\n━━━━━━━━━━━━━━━\n📊 پیشرفت: {percent}% [{bar}]\n📦 پارت‌ها: {part_index-1} از {total_parts}\n⚡ سرعت: {(speed_bps/(1024*1024)):.2f} MB/s\n📥 ارسال: {uploaded_bytes/(1024*1024):.2f} از {total_mb:.2f} MB\n⏱ سپری شده: {elapsed}")
                     last_update_time, last_percent = now, percent
                 
     remaining_data = chunker.extract_remaining()
@@ -279,12 +292,13 @@ async def upload_entire_file_stream(client, shared_session, file_url, target_gui
             uploaded_bytes += length
 
     await progress_callback("✅ تزریق پارت‌ها پایان یافت. در حال همگام‌سازی نهایی سرور...")
+    final_elapsed = format_time(time.time() - start_time)
     
     for attempt in range(6):
         try:
             await client.send_message(
                 target_guid, 
-                text=f"✅ دانلود مستقیم انجام شد.\n📂 نام: {real_file_name}",
+                text=f"✅ دانلود مستقیم در روبیکا انجام شد.\n📂 نام: `{real_file_name}`\n⏱ زمان کل: **{final_elapsed}**",
                 file_inline={"mime": real_mime, "size": total_size_bytes, "dc_id": str(dc_id), "file_id": str(file_id), "file_name": real_file_name, "access_hash_rec": final_access_hash, "type": "File"}
             )
             break 
@@ -344,9 +358,60 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
         msg_data = await message_queue.get()
         msg_id, text = msg_data["id"], msg_data["text"]
         try:
+            # مدیریت خطاهای ربات در حین پردازش
             if state.status == BotStatus.COOLDOWN:
                 await client.send_message(TARGET_CHAT_GUID, "⏳ سیستم در حال استراحت است...", reply_to_message_id=str(msg_id)); continue
-            if text.startswith(AUTH_PREFIX):
+            
+            # 🌟 دستورات مدیریت فایل (File Manager Toolkit)
+            if text == "#files":
+                files = os.listdir(DOWNLOAD_DIR)
+                if not files:
+                    await client.send_message(TARGET_CHAT_GUID, "📭 هارد سرور خالی است.", reply_to_message_id=str(msg_id))
+                else:
+                    msg = "📂 **لیست فایل‌های موجود در دیسک آروان:**\n\n"
+                    for f in files:
+                        f_path = os.path.join(DOWNLOAD_DIR, f)
+                        if os.path.isfile(f_path):
+                            size_mb = os.path.getsize(f_path) / (1024*1024)
+                            msg += f"🔹 `{f}` ({size_mb:.2f} MB)\n"
+                    msg += "\n🗑 حذف یک فایل: `#rm name.ext`\n🧹 حذف کل فایل‌ها: `#rm all`\n✏️ تغییر نام: `#rn old.ext new.ext`"
+                    await client.send_message(TARGET_CHAT_GUID, msg, reply_to_message_id=str(msg_id))
+            
+            elif text.startswith("#rm "):
+                filename = text.replace("#rm ", "").strip()
+                if filename.lower() == "all":
+                    count = 0
+                    for f in os.listdir(DOWNLOAD_DIR):
+                        f_path = os.path.join(DOWNLOAD_DIR, f)
+                        if os.path.isfile(f_path):
+                            os.remove(f_path)
+                            count += 1
+                    await client.send_message(TARGET_CHAT_GUID, f"🧹 هارد سرور فرمت شد! ({count} فایل پاک شد)", reply_to_message_id=str(msg_id))
+                else:
+                    target_path = os.path.join(DOWNLOAD_DIR, filename)
+                    if os.path.exists(target_path):
+                        os.remove(target_path)
+                        await client.send_message(TARGET_CHAT_GUID, f"🗑 فایل `{filename}` با موفقیت پاک شد.", reply_to_message_id=str(msg_id))
+                    else:
+                        await client.send_message(TARGET_CHAT_GUID, f"❌ فایل یافت نشد.", reply_to_message_id=str(msg_id))
+
+            elif text.startswith("#rn "):
+                parts = text.replace("#rn ", "").strip().split()
+                if len(parts) == 2:
+                    old_name, new_name = parts[0], parts[1]
+                    old_path = os.path.join(DOWNLOAD_DIR, old_name)
+                    new_path = os.path.join(DOWNLOAD_DIR, new_name)
+                    if os.path.exists(old_path):
+                        os.rename(old_path, new_path)
+                        direct_link = f"http://{ARVAN_DOMAIN}/{urllib.parse.quote(new_name)}"
+                        await client.send_message(TARGET_CHAT_GUID, f"✅ **تغییر نام موفق:**\nاز: `{old_name}`\nبه: `{new_name}`\n\n🔗 لینک جدید:\n{direct_link}", reply_to_message_id=str(msg_id))
+                    else:
+                        await client.send_message(TARGET_CHAT_GUID, f"❌ فایل مبدا پیدا نشد.", reply_to_message_id=str(msg_id))
+                else:
+                    await client.send_message(TARGET_CHAT_GUID, "❌ فرمت اشتباه است. مثال:\n`#rn video.mp4 movie.mp4`", reply_to_message_id=str(msg_id))
+
+            # 🌟 دستور استریم و آپلود
+            elif text.startswith(AUTH_PREFIX):
                 if state.status == BotStatus.PROCESSING:
                     await client.send_message(TARGET_CHAT_GUID, "⏳ سیستم درگیر است. دستور توقف بدهید.", reply_to_message_id=str(msg_id)); continue 
                 url = text.replace(AUTH_PREFIX, "").strip()
@@ -381,6 +446,11 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
                     await client.send_message(TARGET_CHAT_GUID, "🛑 سیگنال توقف ارسال شد...", reply_to_message_id=str(msg_id))
                     await asyncio.sleep(3.0) 
                     state.status = BotStatus.IDLE; await client.send_message(TARGET_CHAT_GUID, "✅ ارتباط قطع شد.", reply_to_message_id=str(msg_id))
+            
+            elif text == "#clear_chat" and state.status != BotStatus.PROCESSING:
+                state.status = BotStatus.PROCESSING
+                await client.send_message(TARGET_CHAT_GUID, "🧹 شروع پاکسازی پیام‌ها...", reply_to_message_id=str(msg_id))
+                state.active_task = asyncio.create_task(clear_chat_history_task(client, TARGET_CHAT_GUID))
                     
         finally: message_queue.task_done()
 
@@ -389,12 +459,10 @@ async def command_processor(client: Client, shared_session: aiohttp.ClientSessio
 # ==========================================
 async def main():
     connector = aiohttp.TCPConnector(limit=30)
-    
-    # 🌟 استارت وب‌سرور نیتیو aiohttp در پس‌زمینه بدون بلاک کردن ربات
     asyncio.create_task(start_web_server())
     
     async with Client('time_sessions') as client, aiohttp.ClientSession(connector=connector) as shared_session:
-        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 موتور وب‌سرور ناهمگام (Async) با موفقیت روی هسته سوار شد...")
+        init_msg = await client.send_message(TARGET_CHAT_GUID, "🤖 پنل ابری، سیستم مدیریت فایل و تایمر زنده آماده است...")
         state.last_processed_id = extract_message_id(init_msg)
         
         await asyncio.gather(
